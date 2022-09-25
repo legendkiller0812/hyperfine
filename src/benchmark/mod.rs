@@ -3,9 +3,9 @@ pub mod executor;
 pub mod relative_speed;
 pub mod scheduler;
 pub mod timing_result;
-
-use std::cmp;
-
+use crate::benchmark::executor::MockExecutor;
+use crate::benchmark::executor::RawExecutor;
+use crate::benchmark::executor::ShellExecutor;
 use crate::command::Command;
 use crate::options::{CmdFailureAction, ExecutorKind, Options, OutputStyleOption};
 use crate::outlier_detection::{modified_zscores, OUTLIER_THRESHOLD};
@@ -16,7 +16,16 @@ use crate::parameter::ParameterNameAndValue;
 use crate::util::exit_code::extract_exit_code;
 use crate::util::min_max::{max, min};
 use crate::util::units::Second;
+
+use scoped_threadpool::Pool;
+
+
 use benchmark_result::BenchmarkResult;
+use std::cmp;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
 use timing_result::TimingResult;
 
 use anyhow::{anyhow, Result};
@@ -112,6 +121,8 @@ impl<'a> Benchmark<'a> {
 
     /// Run the benchmark for a single command
     pub fn run(&self) -> Result<BenchmarkResult> {
+        env_logger::init();
+
         let command_name = self.command.get_name();
         if self.options.output_style != OutputStyleOption::Disabled {
             println!(
@@ -226,33 +237,93 @@ impl<'a> Benchmark<'a> {
             bar.inc(1)
         }
 
+        let local_timeunit = self.options.time_unit.clone();
+        let self_clone = self.clone();
+        let localexecutor: Arc<dyn Executor> = match self_clone.options.executor_kind {
+            ExecutorKind::Raw => Arc::new(RawExecutor::new(self_clone.options)),
+            ExecutorKind::Mock(ref shell) => Arc::new(MockExecutor::new(shell.clone())),
+            ExecutorKind::Shell(ref shell) => {
+                Arc::new(ShellExecutor::new(shell, self_clone.options))
+            }
+        };
         // Gather statistics (perform the actual benchmark)
-        for _ in 0..count_remaining {
-            run_preparation_command()?;
 
-            let msg = {
-                let mean = format_duration(mean(&times_real), self.options.time_unit);
-                format!("Current estimate: {}", mean.to_string().green())
-            };
 
-            if let Some(bar) = progress_bar.as_ref() {
-                bar.set_message(msg.to_owned())
+
+        run_preparation_command()?;
+
+        let mut pool = Pool::new(self_clone.options.num_threads as u32);
+        let mutex_times_real: Arc<Mutex<Vec<Second>>> = Arc::new(Mutex::new(times_real.clone()));
+        let mutex_times_user: Arc<Mutex<Vec<Second>>> = Arc::new(Mutex::new(times_user.clone()));
+        let mutex_times_system: Arc<Mutex<Vec<Second>>> =
+            Arc::new(Mutex::new(times_system.clone()));
+        let mutex_exit_codes: Arc<Mutex<Vec<Option<i32>>>> =
+            Arc::new(Mutex::new(exit_codes.clone()));
+        let mutex_all_succeeded: Arc<Mutex<bool>> = Arc::new(Mutex::new(all_succeeded.clone()));
+
+        let local_command = Arc::new(self.command.deref().clone());
+
+        pool.scoped(|s| {
+            let mut handles = Vec::new();
+            for cnt in 0..count_remaining {
+                let t_times_real = mutex_times_real.clone();
+                let t_times_user = mutex_times_user.clone();
+                let t_times_system = mutex_times_system.clone();
+                let t_exit_codes = mutex_exit_codes.clone();
+                let t_all_succeeded = mutex_all_succeeded.clone();
+                let t_command = local_command.clone();
+                let t_bar = progress_bar.clone();
+                let t_executor = localexecutor.clone();
+                let handle = s.execute(move || {
+                    {
+                        let time_temp = &t_times_real.lock().unwrap();
+                        debug!("Thread {:?} acquired lock", cnt);
+                        let msg = {
+                            let mean = format_duration(mean(&time_temp), local_timeunit);
+                            format!("Current estimate: {}", mean.to_string().green())
+                        };
+                        if let Some(bar) = t_bar.as_ref() {
+                            bar.set_message(msg.to_owned())
+                        }
+                        debug!("Thread {:?} released lock", cnt);
+                    }
+                    //t_command = t_command.clone();
+
+                    //let (res, status) = mylocalexecutor.run_command_and_measure(&thread_command, None);
+                    debug!("Thread {:?} Starting command", cnt);
+
+                    let (res, status) = if let Ok((res, status)) =
+                        t_executor.run_command_and_measure(&t_command, None)
+                    {
+                        (res, status)
+                    } else {
+                        panic!("Problem in thread {:?}: {:?}", cnt, status)
+                    };
+                    debug!("Thread {:?} Finishes command", cnt);
+                    let success = status.success();
+                    debug!("Thread {:?} acquired lock", cnt);
+
+                    t_times_real.lock().unwrap().push(res.time_real);
+                    t_times_user.lock().unwrap().push(res.time_user);
+                    t_times_system.lock().unwrap().push(res.time_system);
+                    debug!("Thread {:?} released lock", cnt);
+
+                    let mut s = t_all_succeeded.lock().unwrap();
+                    *s = *s && success;
+
+                    if let Some(bar) = t_bar.as_ref() {
+                        bar.inc(1)
+                    }
+                    t_exit_codes.lock().unwrap().push(extract_exit_code(status));
+                });
+                handles.push(handle);
             }
+        });
 
-            let (res, status) = self.executor.run_command_and_measure(self.command, None)?;
-            let success = status.success();
-
-            times_real.push(res.time_real);
-            times_user.push(res.time_user);
-            times_system.push(res.time_system);
-            exit_codes.push(extract_exit_code(status));
-
-            all_succeeded = all_succeeded && success;
-
-            if let Some(bar) = progress_bar.as_ref() {
-                bar.inc(1)
-            }
-        }
+        times_real = mutex_times_real.lock().unwrap().clone();
+        times_user = mutex_times_user.lock().unwrap().clone();
+        times_system = mutex_times_system.lock().unwrap().clone();
+        exit_codes = mutex_exit_codes.lock().unwrap().clone();
 
         if let Some(bar) = progress_bar.as_ref() {
             bar.finish_and_clear()

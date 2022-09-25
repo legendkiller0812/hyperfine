@@ -12,7 +12,7 @@ use super::timing_result::TimingResult;
 use anyhow::{bail, Context, Result};
 use statistical::mean;
 
-pub trait Executor {
+pub trait Executor: Send + Sync {
     /// Run the given command and measure the execution time
     fn run_command_and_measure(
         &self,
@@ -64,6 +64,7 @@ fn run_command_and_measure_common(
     Ok(result)
 }
 
+#[derive(Copy, Clone)]
 pub struct RawExecutor<'a> {
     options: &'a Options,
 }
@@ -106,6 +107,7 @@ impl<'a> Executor for RawExecutor<'a> {
     }
 }
 
+#[derive(Copy, Clone)]
 pub struct ShellExecutor<'a> {
     options: &'a Options,
     shell: &'a Shell,

@@ -114,6 +114,7 @@ impl<'a> Command<'a> {
 }
 
 /// A collection of commands that should be benchmarked
+#[derive(Clone)]
 pub struct Commands<'a>(Vec<Command<'a>>);
 
 impl<'a> Commands<'a> {

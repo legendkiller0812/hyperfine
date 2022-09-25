@@ -43,6 +43,16 @@ fn build_command() -> Command<'static> {
                 ),
         )
         .arg(
+            Arg::new("num-threads")
+                .long("num-threads")
+                .short('t')
+                .takes_value(true)
+                .value_name("NUM")
+                .help(
+                    "Number of threads to concurrently run",
+                ),
+        )
+        .arg(
             Arg::new("min-runs")
                 .long("min-runs")
                 .short('m')

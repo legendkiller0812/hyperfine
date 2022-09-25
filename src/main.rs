@@ -2,6 +2,10 @@
     all(windows, feature = "windows_process_extensions_main_thread_handle"),
     feature(windows_process_extensions_main_thread_handle)
 )]
+#[macro_use]
+extern crate log;
+extern crate scoped_threadpool;
+use log::{debug, error, info, log_enabled, Level};
 
 use std::env;
 

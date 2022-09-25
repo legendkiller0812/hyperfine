@@ -166,6 +166,9 @@ impl Default for ExecutorKind {
 
 /// The main settings for a hyperfine benchmark session
 pub struct Options {
+    ///Number of parallel threads
+    pub num_threads: u64,
+
     /// Upper and lower bound for the number of benchmark runs
     pub run_bounds: RunBounds,
 
@@ -204,6 +207,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             run_bounds: RunBounds::default(),
+            num_threads: 1,
             warmup_count: 0,
             min_benchmarking_time: 3.0,
             command_failure_action: CmdFailureAction::RaiseError,
@@ -230,7 +234,7 @@ impl Options {
                 })
                 .transpose()
         };
-
+        options.num_threads = param_to_u64("num-threads")?.unwrap_or(options.num_threads);
         options.warmup_count = param_to_u64("warmup")?.unwrap_or(options.warmup_count);
 
         let mut min_runs = param_to_u64("min-runs")?;
