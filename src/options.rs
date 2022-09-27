@@ -169,6 +169,8 @@ pub struct Options {
     ///Number of parallel threads
     pub num_threads: u64,
 
+    ///Batch command to run before command
+    pub batch_cmd: Option<String>,
     /// Upper and lower bound for the number of benchmark runs
     pub run_bounds: RunBounds,
 
@@ -213,6 +215,7 @@ impl Default for Options {
             command_failure_action: CmdFailureAction::RaiseError,
             preparation_command: None,
             setup_command: None,
+            batch_cmd: None,
             cleanup_command: None,
             output_style: OutputStyleOption::Full,
             executor_kind: ExecutorKind::default(),
@@ -235,6 +238,8 @@ impl Options {
                 .transpose()
         };
         options.num_threads = param_to_u64("num-threads")?.unwrap_or(options.num_threads);
+        options.batch_cmd = matches.value_of("batch-cmd").map(String::from);
+
         options.warmup_count = param_to_u64("warmup")?.unwrap_or(options.warmup_count);
 
         let mut min_runs = param_to_u64("min-runs")?;

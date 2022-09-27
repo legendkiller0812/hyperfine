@@ -43,6 +43,16 @@ fn build_command() -> Command<'static> {
                 ),
         )
         .arg(
+            Arg::new("batch-cmd")
+                .long("batch-cmd")
+                .short('b')
+                .takes_value(true)
+                .value_name("BAT")
+                .help(
+                    "The Batch script to run the commands on",
+                ),
+        )
+        .arg(
             Arg::new("num-threads")
                 .long("num-threads")
                 .short('t')

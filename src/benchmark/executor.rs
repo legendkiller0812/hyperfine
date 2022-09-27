@@ -2,7 +2,6 @@ use std::process::{ExitStatus, Stdio};
 
 use crate::command::Command;
 use crate::options::{CmdFailureAction, CommandOutputPolicy, Options, OutputStyleOption, Shell};
-use crate::output::progress_bar::get_progress_bar;
 use crate::timer::{execute_and_measure, TimerResult};
 use crate::util::randomized_environment_offset;
 use crate::util::units::Second;
@@ -10,6 +9,7 @@ use crate::util::units::Second;
 use super::timing_result::TimingResult;
 
 use anyhow::{bail, Context, Result};
+use indicatif::ProgressBar;
 use statistical::mean;
 
 pub trait Executor: Send + Sync {
@@ -24,7 +24,7 @@ pub trait Executor: Send + Sync {
     /// when running commands through a shell, we need to
     /// measure the shell spawning time separately in order
     /// to subtract it from the full runtime later.
-    fn calibrate(&mut self) -> Result<()>;
+    fn calibrate(&mut self, progress_bar: &ProgressBar) -> Result<()>;
 
     /// Return the time overhead for this executor when
     /// performing a measurement. This should return the time
@@ -98,7 +98,7 @@ impl<'a> Executor for RawExecutor<'a> {
         ))
     }
 
-    fn calibrate(&mut self) -> Result<()> {
+    fn calibrate(&mut self, progress_bar: &ProgressBar) -> Result<()> {
         Ok(())
     }
 
@@ -160,17 +160,12 @@ impl<'a> Executor for ShellExecutor<'a> {
     }
 
     /// Measure the average shell spawning time
-    fn calibrate(&mut self) -> Result<()> {
+    fn calibrate(&mut self, progress_bar: &ProgressBar) -> Result<()> {
         const COUNT: u64 = 50;
-        let progress_bar = if self.options.output_style != OutputStyleOption::Disabled {
-            Some(get_progress_bar(
-                COUNT,
-                "Measuring shell spawning time",
-                self.options.output_style,
-            ))
-        } else {
-            None
-        };
+        if self.options.output_style != OutputStyleOption::Disabled {
+            progress_bar.set_length(COUNT);
+            progress_bar.set_message("Measuring shell spawning time");
+        }
 
         let mut times_real: Vec<Second> = vec![];
         let mut times_user: Vec<Second> = vec![];
@@ -200,13 +195,13 @@ impl<'a> Executor for ShellExecutor<'a> {
                 }
             }
 
-            if let Some(bar) = progress_bar.as_ref() {
+            if let Some(bar) = Some(progress_bar) {
                 bar.inc(1)
             }
         }
 
-        if let Some(bar) = progress_bar.as_ref() {
-            bar.finish_and_clear()
+        if let Some(bar) = Some(progress_bar) {
+            bar.reset()
         }
 
         self.shell_spawning_time = Some(TimingResult {
@@ -271,7 +266,7 @@ impl Executor for MockExecutor {
         ))
     }
 
-    fn calibrate(&mut self) -> Result<()> {
+    fn calibrate(&mut self, progress_bar: &ProgressBar) -> Result<()> {
         Ok(())
     }
 

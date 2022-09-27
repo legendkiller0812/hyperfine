@@ -10,7 +10,7 @@ pub enum Alignment {
     Left,
     Right,
 }
-pub trait MarkupExporter {
+pub trait MarkupExporter: Send + Sync {
     fn table_results(&self, entries: &[BenchmarkResultWithRelativeSpeed], unit: Unit) -> String {
         // prepare table header strings
         let notation = format!("[{}]", unit.short_name());

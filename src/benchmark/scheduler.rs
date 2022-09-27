@@ -3,12 +3,16 @@ use colored::*;
 use super::benchmark_result::BenchmarkResult;
 use super::executor::{Executor, MockExecutor, RawExecutor, ShellExecutor};
 use super::{relative_speed, Benchmark};
+use std::{thread, time};
 
 use crate::command::Commands;
 use crate::export::ExportManager;
 use crate::options::{ExecutorKind, Options, OutputStyleOption};
-
+use crate::output::progress_bar::get_progress_bar;
 use anyhow::Result;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 pub struct Scheduler<'a> {
     commands: &'a Commands<'a>,
@@ -32,24 +36,78 @@ impl<'a> Scheduler<'a> {
     }
 
     pub fn run_benchmarks(&mut self) -> Result<()> {
-        let mut executor: Box<dyn Executor> = match self.options.executor_kind {
-            ExecutorKind::Raw => Box::new(RawExecutor::new(self.options)),
+        let m = MultiProgress::new();
+
+        let mut pb = std::iter::repeat_with(|| {
+            let progress_bar = if self.options.output_style != OutputStyleOption::Disabled {
+                Some(get_progress_bar(
+                    20,
+                    &format!("Performing batch overhead {:?}/{:?}", 0, 20),
+                    self.options.output_style,
+                ))
+            } else {
+                None
+            };
+            m.add(progress_bar.unwrap())
+        })
+        .take(self.commands.num_commands())
+        .collect::<Vec<_>>();
+
+        m.println("Starting the benchmark. Please hold...").unwrap();
+        let self_clone = self.options.clone();
+        let mut localexecutor: Box<dyn Executor> = match self_clone.executor_kind {
+            ExecutorKind::Raw => Box::new(RawExecutor::new(self_clone)),
             ExecutorKind::Mock(ref shell) => Box::new(MockExecutor::new(shell.clone())),
-            ExecutorKind::Shell(ref shell) => Box::new(ShellExecutor::new(shell, self.options)),
+            ExecutorKind::Shell(ref shell) => {
+                Box::new(ShellExecutor::new(shell, self_clone))
+            }
         };
 
-        executor.calibrate()?;
+        localexecutor.calibrate(pb.get(0).unwrap())?;
+        let localexecutor:Arc<dyn Executor> = Arc::from(localexecutor);
 
+
+        let pool =  rayon::ThreadPoolBuilder::new()
+        .num_threads(self.options.num_threads as usize)
+        .build()
+        .unwrap();
+        let results_vec = Arc::new(Mutex::new(Vec::new()));
         for (number, cmd) in self.commands.iter().enumerate() {
-            self.results
-                .push(Benchmark::new(number, cmd, self.options, &*executor).run()?);
+        pool.scope(|s| {
+                let t_executor = localexecutor.clone();
+                let t_pbar = Some(pb.get(number).unwrap()).clone();
+                let t_multiprogress = m.clone();
+                let t_cmd = cmd.clone();
+                let t_options = self_clone.clone();
+                let t_results = results_vec.clone();
 
-            // We export (all results so far) after each individual benchmark, because
-            // we would risk losing all results if a later benchmark fails.
-            self.export_manager
-                .write_results(&self.results, self.options.time_unit)?;
-        }
 
+                let handle = s.spawn(move |_| {
+                    let ret = Benchmark::new(
+                        number,
+                        &t_cmd,
+                        t_options,
+                        t_executor.to_owned().as_ref() ,
+                        t_pbar,
+                        &t_multiprogress,
+                    )
+                    .run();
+                    match ret {
+                        Ok(res) => {
+                            t_results.lock().unwrap().push(res);
+                        }
+                        Err(status) => panic!("Problem in thread {:?}: {:?}", number, status),
+                    };
+                });
+            });
+            }
+
+        self.results = results_vec.lock().unwrap().to_owned();
+
+        // We export (all results so far) after each individual benchmark, because
+        // we would risk losing all results if a later benchmark fails.
+        self.export_manager
+            .write_results(&self.results, self.options.time_unit)?;
         Ok(())
     }
 

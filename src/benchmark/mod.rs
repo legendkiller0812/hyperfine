@@ -10,22 +10,23 @@ use crate::command::Command;
 use crate::options::{CmdFailureAction, ExecutorKind, Options, OutputStyleOption};
 use crate::outlier_detection::{modified_zscores, OUTLIER_THRESHOLD};
 use crate::output::format::{format_duration, format_duration_unit};
-use crate::output::progress_bar::get_progress_bar;
 use crate::output::warnings::Warnings;
 use crate::parameter::ParameterNameAndValue;
 use crate::util::exit_code::extract_exit_code;
 use crate::util::min_max::{max, min};
 use crate::util::units::Second;
 
-use scoped_threadpool::Pool;
-
+use indicatif::MultiProgress;
+use indicatif::ProgressBar;
+use rayon::prelude::*;
 
 use benchmark_result::BenchmarkResult;
 use std::cmp;
 use std::ops::Deref;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::thread;
+
 use timing_result::TimingResult;
 
 use anyhow::{anyhow, Result};
@@ -42,6 +43,8 @@ pub struct Benchmark<'a> {
     command: &'a Command<'a>,
     options: &'a Options,
     executor: &'a dyn Executor,
+    progress_bar: std::option::Option<&'a ProgressBar>,
+    multiprogress: &'a MultiProgress,
 }
 
 impl<'a> Benchmark<'a> {
@@ -50,15 +53,18 @@ impl<'a> Benchmark<'a> {
         command: &'a Command<'a>,
         options: &'a Options,
         executor: &'a dyn Executor,
+        progress_bar: std::option::Option<&'a ProgressBar>,
+        multiprogress: &'a MultiProgress,
     ) -> Self {
         Benchmark {
             number,
             command,
             options,
             executor,
+            progress_bar,
+            multiprogress,
         }
     }
-
     /// Run setup, cleanup, or preparation commands
     fn run_intermediate_command(
         &self,
@@ -121,16 +127,76 @@ impl<'a> Benchmark<'a> {
 
     /// Run the benchmark for a single command
     pub fn run(&self) -> Result<BenchmarkResult> {
-        env_logger::init();
-
         let command_name = self.command.get_name();
-        if self.options.output_style != OutputStyleOption::Disabled {
-            println!(
-                "{}{}: {}",
-                "Benchmark ".bold(),
-                (self.number + 1).to_string().bold(),
-                command_name,
-            );
+
+        let mut pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(10)
+        .build()
+        .unwrap();
+        let mut batch_average: f32 = 0.0;
+        //Finding Batch overhead
+        {
+            let batch_runs = 10;
+            let mut times_batch: Vec<Second> = vec![];
+            let mutex_times_batch: Arc<Mutex<Vec<Second>>> =
+                Arc::new(Mutex::new(times_batch.clone()));
+            let command_name = String::from("batch");
+            let command_expr = self.options.batch_cmd.as_ref().unwrap();
+            let batch_command = Command::new(Some(&command_name), &command_expr);
+
+            let local_command = Arc::new(batch_command.clone());
+
+            let self_clone = self.clone();
+            let localexecutor: Arc<dyn Executor> = match self_clone.options.executor_kind {
+                ExecutorKind::Raw => Arc::new(RawExecutor::new(self_clone.options)),
+                ExecutorKind::Mock(ref shell) => Arc::new(MockExecutor::new(shell.clone())),
+                ExecutorKind::Shell(ref shell) => {
+                    Arc::new(ShellExecutor::new(shell, self_clone.options))
+                }
+            };
+            if let Some(bar) = self.progress_bar {
+                bar.set_length(batch_runs);
+                bar.set_message(format!(
+                    "Performing batch overhead {:?}/{:?}",
+                    0, batch_runs
+                ));
+            }
+            pool.scope(|s| {
+                let mut handles = Vec::new();
+                for cnt in 0..batch_runs {
+                    let t_times_batch = mutex_times_batch.clone();
+                    let t_executor = localexecutor.clone();
+                    let t_command = local_command.clone();
+                    let t_bar = self.progress_bar.clone();
+                    let handle = s.spawn(move |_| {
+                        let mut success: bool = false;
+                        let ret = t_executor.run_command_and_measure(&t_command, None);
+                        match ret {
+                            Ok(res) => {
+                                t_times_batch.lock().unwrap().push(res.0.time_real);
+                                success = res.1.success();
+                            }
+                            Err(status) => panic!("Problem in thread {:?}: {:?}", cnt, status),
+                        };
+
+                        if let Some(bar) = t_bar.as_ref() {
+                            bar.inc(1);
+                            bar.set_message(format!(
+                                "{:?}. batch overhead calc {:?}/{:?}",
+                                self.number,
+                                bar.position(),
+                                batch_runs
+                            ));
+                        }
+                    });
+                    handles.push(handle);
+                }
+            });
+            if let Some(bar) = self.progress_bar {
+                bar.reset()
+            }
+            times_batch = mutex_times_batch.lock().unwrap().clone();
+            batch_average = times_batch.iter().sum::<f64>() as f32 / times_batch.len() as f32;
         }
 
         let mut times_real: Vec<Second> = vec![];
@@ -162,38 +228,28 @@ impl<'a> Benchmark<'a> {
 
         // Warmup phase
         if self.options.warmup_count > 0 {
-            let progress_bar = if self.options.output_style != OutputStyleOption::Disabled {
-                Some(get_progress_bar(
-                    self.options.warmup_count,
-                    "Performing warmup runs",
-                    self.options.output_style,
-                ))
-            } else {
-                None
-            };
+            if let Some(bar) = self.progress_bar {
+                bar.set_length(self.options.warmup_count);
+                bar.set_message("Performing warmup runs");
+            }
 
             for _ in 0..self.options.warmup_count {
                 let _ = run_preparation_command()?;
                 let _ = self.executor.run_command_and_measure(self.command, None)?;
-                if let Some(bar) = progress_bar.as_ref() {
+                if let Some(bar) = self.progress_bar.as_ref() {
                     bar.inc(1)
                 }
             }
-            if let Some(bar) = progress_bar.as_ref() {
-                bar.finish_and_clear()
+            if let Some(bar) = self.progress_bar.as_ref() {
+                bar.reset()
             }
         }
 
         // Set up progress bar (and spinner for initial measurement)
-        let progress_bar = if self.options.output_style != OutputStyleOption::Disabled {
-            Some(get_progress_bar(
-                self.options.run_bounds.min,
-                "Initial time measurement",
-                self.options.output_style,
-            ))
-        } else {
-            None
-        };
+        if let Some(bar) = self.progress_bar {
+            bar.set_length(self.options.run_bounds.min);
+            bar.set_message("Initial time measurement");
+        }
 
         let preparation_result = run_preparation_command()?;
         let preparation_overhead =
@@ -230,10 +286,10 @@ impl<'a> Benchmark<'a> {
         all_succeeded = all_succeeded && success;
 
         // Re-configure the progress bar
-        if let Some(bar) = progress_bar.as_ref() {
+        if let Some(bar) = self.progress_bar.as_ref() {
             bar.set_length(count)
         }
-        if let Some(bar) = progress_bar.as_ref() {
+        if let Some(bar) = self.progress_bar.as_ref() {
             bar.inc(1)
         }
 
@@ -248,11 +304,8 @@ impl<'a> Benchmark<'a> {
         };
         // Gather statistics (perform the actual benchmark)
 
-
-
         run_preparation_command()?;
 
-        let mut pool = Pool::new(self_clone.options.num_threads as u32);
         let mutex_times_real: Arc<Mutex<Vec<Second>>> = Arc::new(Mutex::new(times_real.clone()));
         let mutex_times_user: Arc<Mutex<Vec<Second>>> = Arc::new(Mutex::new(times_user.clone()));
         let mutex_times_system: Arc<Mutex<Vec<Second>>> =
@@ -262,9 +315,12 @@ impl<'a> Benchmark<'a> {
         let mutex_all_succeeded: Arc<Mutex<bool>> = Arc::new(Mutex::new(all_succeeded.clone()));
 
         let local_command = Arc::new(self.command.deref().clone());
-
-        pool.scoped(|s| {
-            let mut handles = Vec::new();
+        let mut handles = Vec::new();
+        pool =  rayon::ThreadPoolBuilder::new()
+        .num_threads(self.options.num_threads as usize)
+        .build()
+        .unwrap();
+        pool.scope(|s| {
             for cnt in 0..count_remaining {
                 let t_times_real = mutex_times_real.clone();
                 let t_times_user = mutex_times_user.clone();
@@ -272,12 +328,11 @@ impl<'a> Benchmark<'a> {
                 let t_exit_codes = mutex_exit_codes.clone();
                 let t_all_succeeded = mutex_all_succeeded.clone();
                 let t_command = local_command.clone();
-                let t_bar = progress_bar.clone();
+                let t_bar = self.progress_bar.clone();
                 let t_executor = localexecutor.clone();
-                let handle = s.execute(move || {
+                let handle = s.spawn(move |_| {
                     {
                         let time_temp = &t_times_real.lock().unwrap();
-                        debug!("Thread {:?} acquired lock", cnt);
                         let msg = {
                             let mean = format_duration(mean(&time_temp), local_timeunit);
                             format!("Current estimate: {}", mean.to_string().green())
@@ -285,12 +340,10 @@ impl<'a> Benchmark<'a> {
                         if let Some(bar) = t_bar.as_ref() {
                             bar.set_message(msg.to_owned())
                         }
-                        debug!("Thread {:?} released lock", cnt);
                     }
                     //t_command = t_command.clone();
 
                     //let (res, status) = mylocalexecutor.run_command_and_measure(&thread_command, None);
-                    debug!("Thread {:?} Starting command", cnt);
 
                     let (res, status) = if let Ok((res, status)) =
                         t_executor.run_command_and_measure(&t_command, None)
@@ -299,14 +352,14 @@ impl<'a> Benchmark<'a> {
                     } else {
                         panic!("Problem in thread {:?}: {:?}", cnt, status)
                     };
-                    debug!("Thread {:?} Finishes command", cnt);
                     let success = status.success();
-                    debug!("Thread {:?} acquired lock", cnt);
 
-                    t_times_real.lock().unwrap().push(res.time_real);
+                    t_times_real
+                        .lock()
+                        .unwrap()
+                        .push(res.time_real );
                     t_times_user.lock().unwrap().push(res.time_user);
                     t_times_system.lock().unwrap().push(res.time_system);
-                    debug!("Thread {:?} released lock", cnt);
 
                     let mut s = t_all_succeeded.lock().unwrap();
                     *s = *s && success;
@@ -325,8 +378,8 @@ impl<'a> Benchmark<'a> {
         times_system = mutex_times_system.lock().unwrap().clone();
         exit_codes = mutex_exit_codes.lock().unwrap().clone();
 
-        if let Some(bar) = progress_bar.as_ref() {
-            bar.finish_and_clear()
+        if let Some(bar) = self.progress_bar.as_ref() {
+            bar.finish()
         }
 
         // Compute statistical quantities
@@ -355,35 +408,47 @@ impl<'a> Benchmark<'a> {
 
         if self.options.output_style != OutputStyleOption::Disabled {
             if times_real.len() == 1 {
-                println!(
-                    "  Time ({} ≡):        {:>8}  {:>8}     [User: {}, System: {}]",
-                    "abs".green().bold(),
-                    mean_str.green().bold(),
-                    "        ", // alignment
-                    user_str.blue(),
-                    system_str.blue()
-                );
+                self.multiprogress
+                    .println(format!(
+                        "  Time ({} ≡):        {:>8}  {:>8}     [User: {}, System: {}]",
+                        "abs".green().bold(),
+                        mean_str.green().bold(),
+                        "        ", // alignment
+                        user_str.blue(),
+                        system_str.blue()
+                    ))
+                    .unwrap();
             } else {
                 let stddev_str = format_duration(t_stddev.unwrap(), Some(time_unit));
+                 self.multiprogress.println(format!("{}{}: {}",
+                "Benchmark ",
+                (self.number + 1),
+                command_name, ))?;
+                self.multiprogress
+                    .println(format!(
+                        "  Time ({} ± {}):     {:>8} ± {:>8}    [User: {}, System: {}]",
+                        "mean".green().bold(),
+                        "σ".green(),
+                        mean_str.green().bold(),
+                        stddev_str.green(),
+                        user_str.blue(),
+                        system_str.blue()
+                    ))
+                    .unwrap();
 
-                println!(
-                    "  Time ({} ± {}):     {:>8} ± {:>8}    [User: {}, System: {}]",
-                    "mean".green().bold(),
-                    "σ".green(),
-                    mean_str.green().bold(),
-                    stddev_str.green(),
-                    user_str.blue(),
-                    system_str.blue()
-                );
-
-                println!(
-                    "  Range ({} … {}):   {:>8} … {:>8}    {}",
-                    "min".cyan(),
-                    "max".purple(),
-                    min_str.cyan(),
-                    max_str.purple(),
-                    num_str.dimmed()
-                );
+                self.multiprogress
+                    .println(format!(
+                        "  Range ({} … {}):   {:>8} … {:>8}    {} {}{:.2}",
+                        "min".cyan(),
+                        "max".purple(),
+                        min_str.cyan(),
+                        max_str.purple(),
+                        num_str.dimmed(),
+                        "Batch Overhead :".dimmed(),
+                        batch_average,
+                        //format!("{:.2}",batch_average).dimmed()
+                    ))
+                    .unwrap();
             }
         }
 
@@ -411,15 +476,17 @@ impl<'a> Benchmark<'a> {
         }
 
         if !warnings.is_empty() {
-            eprintln!(" ");
+            self.multiprogress.println(format!(" ")).unwrap();
 
             for warning in &warnings {
-                eprintln!("  {}: {}", "Warning".yellow(), warning);
+                self.multiprogress
+                    .println(format!("  {}: {}", "Warning".yellow(), warning))
+                    .unwrap();
             }
         }
 
         if self.options.output_style != OutputStyleOption::Disabled {
-            println!(" ");
+            self.multiprogress.println(format!(" ")).unwrap();
         }
 
         self.run_cleanup_command(self.command.get_parameters().iter().cloned())?;
