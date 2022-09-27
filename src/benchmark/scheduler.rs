@@ -55,6 +55,7 @@ impl<'a> Scheduler<'a> {
 
         m.println("Starting the benchmark. Please hold...").unwrap();
         let self_clone = self.options.clone();
+        let commands_clone = self.commands.clone();
         let mut localexecutor: Box<dyn Executor> = match self_clone.executor_kind {
             ExecutorKind::Raw => Box::new(RawExecutor::new(self_clone)),
             ExecutorKind::Mock(ref shell) => Box::new(MockExecutor::new(shell.clone())),
@@ -72,8 +73,8 @@ impl<'a> Scheduler<'a> {
         .build()
         .unwrap();
         let results_vec = Arc::new(Mutex::new(Vec::new()));
-        for (number, cmd) in self.commands.iter().enumerate() {
         pool.scope(|s| {
+            for (number, cmd) in commands_clone.iter().enumerate() {
                 let t_executor = localexecutor.clone();
                 let t_pbar = Some(pb.get(number).unwrap()).clone();
                 let t_multiprogress = m.clone();
@@ -99,9 +100,9 @@ impl<'a> Scheduler<'a> {
                         Err(status) => panic!("Problem in thread {:?}: {:?}", number, status),
                     };
                 });
-            });
-            }
 
+            }
+        });
         self.results = results_vec.lock().unwrap().to_owned();
 
         // We export (all results so far) after each individual benchmark, because

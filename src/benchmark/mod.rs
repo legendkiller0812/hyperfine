@@ -15,6 +15,7 @@ use crate::parameter::ParameterNameAndValue;
 use crate::util::exit_code::extract_exit_code;
 use crate::util::min_max::{max, min};
 use crate::util::units::Second;
+use std::time::Duration;
 
 use indicatif::MultiProgress;
 use indicatif::ProgressBar;
@@ -37,6 +38,8 @@ use self::executor::Executor;
 
 /// Threshold for warning about fast execution time
 pub const MIN_EXECUTION_TIME: Second = 5e-3;
+
+
 
 pub struct Benchmark<'a> {
     number: usize,
@@ -156,6 +159,7 @@ impl<'a> Benchmark<'a> {
             };
             if let Some(bar) = self.progress_bar {
                 bar.set_length(batch_runs);
+                //bar.enable_steady_tick(Duration::from_millis(TICK_SETTINGS.1));
                 bar.set_message(format!(
                     "Performing batch overhead {:?}/{:?}",
                     0, batch_runs
