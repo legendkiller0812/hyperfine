@@ -45,7 +45,7 @@ fn build_command() -> Command<'static> {
         .arg(
             Arg::new("batch-cmd")
                 .long("batch-cmd")
-                .short('b')
+                .short('z')
                 .takes_value(true)
                 .value_name("BAT")
                 .help(
@@ -53,6 +53,16 @@ fn build_command() -> Command<'static> {
                 ),
         )
         .arg(
+            Arg::new("num-benchs")
+                .long("num-benchs")
+                .short('b')
+                .takes_value(true)
+                .value_name("NUM")
+                .help(
+                    "Number of benchmarks to concurrently run",
+                ),
+        )
+                .arg(
             Arg::new("num-threads")
                 .long("num-threads")
                 .short('t')

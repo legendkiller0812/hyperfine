@@ -168,7 +168,8 @@ impl Default for ExecutorKind {
 pub struct Options {
     ///Number of parallel threads
     pub num_threads: u64,
-
+    ///Number of benchmarks threads
+    pub num_parallel_benchs: u64,
     ///Batch command to run before command
     pub batch_cmd: Option<String>,
     /// Upper and lower bound for the number of benchmark runs
@@ -210,6 +211,7 @@ impl Default for Options {
         Options {
             run_bounds: RunBounds::default(),
             num_threads: 1,
+            num_parallel_benchs: 1,
             warmup_count: 0,
             min_benchmarking_time: 3.0,
             command_failure_action: CmdFailureAction::RaiseError,
@@ -238,6 +240,7 @@ impl Options {
                 .transpose()
         };
         options.num_threads = param_to_u64("num-threads")?.unwrap_or(options.num_threads);
+        options.num_parallel_benchs = param_to_u64("num-benchs")?.unwrap_or(options.num_threads);
         options.batch_cmd = matches.value_of("batch-cmd").map(String::from);
 
         options.warmup_count = param_to_u64("warmup")?.unwrap_or(options.warmup_count);

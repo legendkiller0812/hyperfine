@@ -69,12 +69,12 @@ impl<'a> Scheduler<'a> {
 
 
         let pool =  rayon::ThreadPoolBuilder::new()
-        .num_threads(self.options.num_threads as usize)
+        .num_threads(self.options.num_parallel_benchs as usize)
         .build()
         .unwrap();
         let results_vec = Arc::new(Mutex::new(Vec::new()));
-        pool.scope(|s| {
-            for (number, cmd) in commands_clone.iter().enumerate() {
+        for (number, cmd) in commands_clone.iter().enumerate() {
+            pool.scope(|s| {
                 let t_executor = localexecutor.clone();
                 let t_pbar = Some(pb.get(number).unwrap()).clone();
                 let t_multiprogress = m.clone();
@@ -100,9 +100,9 @@ impl<'a> Scheduler<'a> {
                         Err(status) => panic!("Problem in thread {:?}: {:?}", number, status),
                     };
                 });
-
+            });
             }
-        });
+
         self.results = results_vec.lock().unwrap().to_owned();
 
         // We export (all results so far) after each individual benchmark, because
