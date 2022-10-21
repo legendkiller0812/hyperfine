@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, f32::consts::E};
 use std::fmt;
 use std::str::FromStr;
 
@@ -12,6 +12,7 @@ use crate::{
 
 use clap::ArgMatches;
 
+
 use crate::parameter::tokenize::tokenize;
 use crate::parameter::ParameterValue;
 
@@ -20,7 +21,7 @@ use clap::Values;
 use rust_decimal::Decimal;
 
 /// A command that should be benchmarked.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default,Debug, Clone, PartialEq, Eq)]
 pub struct Command<'a> {
     /// The command name (without parameter substitution)
     name: Option<&'a str>,
@@ -28,16 +29,21 @@ pub struct Command<'a> {
     /// The command that should be executed (without parameter substitution)
     expression: &'a str,
 
+    ///Batch Command to append
+    batch: String,
+
     /// Zero or more parameter values.
     parameters: Vec<ParameterNameAndValue<'a>>,
 }
 
 impl<'a> Command<'a> {
-    pub fn new(name: Option<&'a str>, expression: &'a str) -> Command<'a> {
+    pub fn new(name: Option<&'a str>, expression: &'a str,batch : String) -> Command<'a> {
         Command {
             name,
             expression,
             parameters: Vec::new(),
+            batch,
+
         }
     }
 
@@ -45,11 +51,13 @@ impl<'a> Command<'a> {
         name: Option<&'a str>,
         expression: &'a str,
         parameters: impl IntoIterator<Item = ParameterNameAndValue<'a>>,
+        batch: String
     ) -> Command<'a> {
         Command {
             name,
             expression,
             parameters: parameters.into_iter().collect(),
+            batch,
         }
     }
 
@@ -85,6 +93,10 @@ impl<'a> Command<'a> {
 
     fn replace_parameters_in(&self, original: &str) -> String {
         let mut result = String::new();
+        if self.batch.ne("") {
+            result.push_str(&self.batch) ;
+            result.push (' ') ;
+        }
         let mut replacements = BTreeMap::<String, String>::new();
         for (param_name, param_value) in &self.parameters {
             replacements.insert(
@@ -115,12 +127,18 @@ impl<'a> Command<'a> {
 
 /// A collection of commands that should be benchmarked
 #[derive(Clone)]
-pub struct Commands<'a>(Vec<Command<'a>>);
+pub struct Commands<'a>(pub Vec<Command<'a>>);
 
 impl<'a> Commands<'a> {
     pub fn from_cli_arguments(matches: &'a ArgMatches) -> Result<Commands> {
         let command_names = matches.values_of("command-name");
         let command_strings = matches.values_of("command").unwrap();
+        let batch_cmd = if  matches.value_of("batch-cmd").is_some()  {
+            matches.value_of("batch-cmd").unwrap().to_owned()
+        } else {
+            "".to_string()
+        };
+       
 
         if let Some(args) = matches.values_of("parameter-scan") {
             let step_size = matches.value_of("parameter-step-size");
@@ -129,6 +147,7 @@ impl<'a> Commands<'a> {
                 command_strings,
                 args,
                 step_size,
+                batch_cmd,
             )?))
         } else if let Some(args) = matches.values_of("parameter-list") {
             let command_names = command_names.map_or(vec![], |names| names.collect::<Vec<&str>>());
@@ -149,6 +168,7 @@ impl<'a> Commands<'a> {
                     bail!("Duplicate parameter names: {}", &duplicates.join(", "));
                 }
             }
+            let test = matches.value_of("batch-cmd").unwrap();
             let command_list = command_strings.collect::<Vec<&str>>();
 
             let dimensions: Vec<usize> = std::iter::once(command_list.len())
@@ -185,6 +205,7 @@ impl<'a> Commands<'a> {
                 i += 1;
 
                 let (command_index, params_indices) = index.split_first().unwrap();
+                let batch_cmd_clone = batch_cmd.clone();
                 let parameters: Vec<_> = param_names_and_values
                     .iter()
                     .zip(params_indices)
@@ -194,6 +215,7 @@ impl<'a> Commands<'a> {
                     name,
                     command_list[*command_index],
                     parameters,
+                    batch_cmd_clone,
                 ));
 
                 // Increment index, exiting loop on overflow.
@@ -218,7 +240,9 @@ impl<'a> Commands<'a> {
             let command_list = command_strings.collect::<Vec<&str>>();
             let mut commands = Vec::with_capacity(command_list.len());
             for (i, s) in command_list.iter().enumerate() {
-                commands.push(Command::new(command_names.get(i).copied(), s));
+                let batch_cmd_clone = batch_cmd.clone();
+                println!("batch is {}",batch_cmd_clone);
+                commands.push(Command::new(command_names.get(i).copied(), s,batch_cmd_clone));
             }
             Ok(Self(commands))
         }
@@ -252,6 +276,7 @@ impl<'a> Commands<'a> {
         step: T,
         command_names: Vec<&'b str>,
         command_strings: Vec<&'b str>,
+        batch_cmd : String,
     ) -> Result<Vec<Command<'b>>, ParameterScanError> {
         let param_range = RangeStep::new(param_min, param_max, step)?;
         let param_count = param_range.size_hint().1.unwrap();
@@ -265,11 +290,11 @@ impl<'a> Commands<'a> {
                 param_count,
             ));
         }
-
         let mut i = 0;
         let mut commands = vec![];
         for value in param_range {
             for cmd in &command_strings {
+                let batch_cmd_clone = batch_cmd.clone();
                 let name = command_names
                     .get(i)
                     .or_else(|| command_names.first())
@@ -278,6 +303,7 @@ impl<'a> Commands<'a> {
                     name,
                     cmd,
                     vec![(param_name, ParameterValue::Numeric(value.into()))],
+                    batch_cmd_clone,
                 ));
                 i += 1;
             }
@@ -290,6 +316,7 @@ impl<'a> Commands<'a> {
         command_strings: Values<'b>,
         mut vals: clap::Values<'b>,
         step: Option<&str>,
+        batch_cmd :String,
     ) -> Result<Vec<Command<'b>>, ParameterScanError> {
         let command_names = command_names.map_or(vec![], |names| names.collect::<Vec<&str>>());
         let command_strings = command_strings.collect::<Vec<&str>>();
@@ -310,6 +337,7 @@ impl<'a> Commands<'a> {
                 step,
                 command_names,
                 command_strings,
+                batch_cmd,
             );
         }
 
@@ -329,6 +357,7 @@ impl<'a> Commands<'a> {
             step,
             command_names,
             command_strings,
+            batch_cmd,
         )
     }
 }
@@ -341,7 +370,7 @@ fn test_get_command_line_nonoverlapping() {
         vec![
             ("foo", ParameterValue::Text("{bar} baz".into())),
             ("bar", ParameterValue::Text("quux".into())),
-        ],
+        ],"".to_string(),
     );
     assert_eq!(cmd.get_command_line(), "echo {bar} baz quux");
 }
@@ -354,7 +383,7 @@ fn test_get_parameterized_command_name() {
         vec![
             ("foo", ParameterValue::Text("baz".into())),
             ("bar", ParameterValue::Text("quux".into())),
-        ],
+        ],"".to_string(),
     );
     assert_eq!(cmd.get_name(), "name-quux-baz");
 }
@@ -388,7 +417,7 @@ fn test_build_commands_cross_product() {
     let cmd = |cmd: usize, par1: &str, par2: &str| {
         let expression = ["echo {par1} {par2}", "printf '%s\n' {par1} {par2}"][cmd];
         let params = vec![("par1", pv(par1)), ("par2", pv(par2))];
-        Command::new_parametrized(None, expression, params)
+        Command::new_parametrized(None, expression, params,"".to_string())
     };
     let expected = vec![
         cmd(0, "a", "z"),
@@ -456,6 +485,7 @@ fn test_parameter_scan_commands_int() {
         3i32,
         vec![],
         vec!["echo {val}"],
+        "".to_string(),
     )
     .unwrap();
     assert_eq!(commands.len(), 3);
@@ -476,6 +506,7 @@ fn test_parameter_scan_commands_decimal() {
         step,
         vec![],
         vec!["echo {val}"],
+        "".to_string(),
     )
     .unwrap();
     assert_eq!(commands.len(), 4);
@@ -484,7 +515,7 @@ fn test_parameter_scan_commands_decimal() {
 }
 
 #[test]
-fn test_parameterr_scan_commands_names() {
+fn test_parameter_scan_commands_names() {
     let commands = Commands::build_parameter_scan_commands(
         "val",
         1i32,
@@ -492,6 +523,7 @@ fn test_parameterr_scan_commands_names() {
         1i32,
         vec!["name-{val}"],
         vec!["echo {val}"],
+        "".to_string(),
     )
     .unwrap();
     assert_eq!(commands.len(), 3);
@@ -511,6 +543,7 @@ fn test_get_specified_command_names() {
         1i32,
         vec!["name-a", "name-b", "name-c"],
         vec!["echo {val}"],
+        "".to_string(),
     )
     .unwrap();
     assert_eq!(commands.len(), 3);
@@ -530,6 +563,7 @@ fn test_different_command_name_count_with_parameters() {
         1i32,
         vec!["name-1", "name-2"],
         vec!["echo {val}"],
+        "".to_string(),
     );
     assert!(matches!(
         result.unwrap_err(),

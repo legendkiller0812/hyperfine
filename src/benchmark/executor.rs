@@ -173,7 +173,7 @@ impl<'a> Executor for ShellExecutor<'a> {
 
         for _ in 0..COUNT {
             // Just run the shell without any command
-            let res = self.run_command_and_measure(&Command::new(None, ""), None);
+            let res = self.run_command_and_measure(&Command::new(None, "","".to_string()), None);
 
             match res {
                 Err(_) => {

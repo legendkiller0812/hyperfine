@@ -89,7 +89,7 @@ impl<'a> Benchmark<'a> {
             .options
             .setup_command
             .as_ref()
-            .map(|setup_command| Command::new_parametrized(None, setup_command, parameters));
+            .map(|setup_command| Command::new_parametrized(None, setup_command, parameters,"".to_string()));
 
         let error_output = "The setup command terminated with a non-zero exit code. \
                             Append ' || true' to the command if you are sure that this can be ignored.";
@@ -109,7 +109,7 @@ impl<'a> Benchmark<'a> {
             .options
             .cleanup_command
             .as_ref()
-            .map(|cleanup_command| Command::new_parametrized(None, cleanup_command, parameters));
+            .map(|cleanup_command| Command::new_parametrized(None, cleanup_command, parameters,"".to_string()));
 
         let error_output = "The cleanup command terminated with a non-zero exit code. \
                             Append ' || true' to the command if you are sure that this can be ignored.";
@@ -145,7 +145,7 @@ impl<'a> Benchmark<'a> {
                 Arc::new(Mutex::new(times_batch.clone()));
             let command_name = String::from("batch");
             let command_expr = self.options.batch_cmd.as_ref().unwrap();
-            let batch_command = Command::new(Some(&command_name), &command_expr);
+            let batch_command = Command::new(Some(&command_name), &command_expr,"".to_string());
 
             let local_command = Arc::new(batch_command.clone());
 
@@ -219,6 +219,7 @@ impl<'a> Benchmark<'a> {
                 None,
                 preparation_command,
                 self.command.get_parameters().iter().cloned(),
+                "".to_string(),
             )
         });
         let run_preparation_command = || {
