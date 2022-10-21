@@ -30,7 +30,7 @@ pub struct Command<'a> {
     expression: &'a str,
 
     ///Batch Command to append
-    batch: String,
+    pub batch: String,
 
     /// Zero or more parameter values.
     parameters: Vec<ParameterNameAndValue<'a>>,

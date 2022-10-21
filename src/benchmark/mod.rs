@@ -144,8 +144,9 @@ impl<'a> Benchmark<'a> {
             let mutex_times_batch: Arc<Mutex<Vec<Second>>> =
                 Arc::new(Mutex::new(times_batch.clone()));
             let command_name = String::from("batch");
-            let command_expr = self.options.batch_cmd.as_ref().unwrap();
-            let batch_command = Command::new(Some(&command_name), &command_expr,"".to_string());
+            let mut command_expr:String = self.options.batch_cmd.as_ref().unwrap().to_owned();
+            command_expr.push_str("sleep 1");
+            let batch_command = Command::new(Some(&command_name), &command_expr,self.command.batch.clone());
 
             let local_command = Arc::new(batch_command.clone());
 
